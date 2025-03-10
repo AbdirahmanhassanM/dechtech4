@@ -1,0 +1,32 @@
+{
+  "name": "dechtech4",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AbdirahmanhassanM/dechtech4.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/AbdirahmanhassanM/dechtech4/issues"
+  },
+  "homepage": "https://github.com/AbdirahmanhassanM/dechtech4#readme",
+  "dependencies": {
+    "axios": "^1.8.2",
+    "body-parser": "^1.20.3",
+    "crypto": "^1.0.1",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
