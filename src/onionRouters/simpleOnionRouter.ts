@@ -1,81 +1,119 @@
-import express from 'express';
+import express, { Request, Response, RequestHandler } from 'express';
 import axios from 'axios';
-import { BASE_ONION_ROUTER_PORT, REGISTRY_PORT } from '../config';
-import { generateKeyPair, decryptRSA } from '../users/crypto';
-import { decryptAES } from '../crypto/aesCrypto'; // Adjust the path as necessary
+import { BASE_NODE_PORT, REGISTRY_PORT } from '../config';
+import { generateKeyPair, decryptRSA, decryptAES } from '../crypto';
 
+export async function startOnionRouter(nodeId: number) {
+  const port = BASE_NODE_PORT + nodeId;
+  const app = express();
+  app.use(express.json());
 
-export class OnionRouter {
-  private app = express();
-  private nodeId: number;
-  private port: number;
-  private privateKey: string;
-  private publicKey: string;
-  private lastEncryptedMessage: string | null = null;
-  private lastDecryptedMessage: string | null = null;
-  private lastMessageDestination: number | null = null;
+  // Generate key pair
+  const { publicKey, privateKey } = generateKeyPair();
 
-  constructor(nodeId: number) {
-    this.nodeId = nodeId;
-    this.port = BASE_ONION_ROUTER_PORT + nodeId;
-    const keys = generateKeyPair();
-    this.privateKey = keys.privateKey;
-    this.publicKey = keys.publicKey;
+  // Store last received messages and destination
+  let lastReceivedEncryptedMessage: string | null = null;
+  let lastReceivedDecryptedMessage: string | null = null;
+  let lastMessageDestination: number | null = null;
 
-    this.app.use(express.json());
+  // Health check route
+  app.get('/status', ((req, res) => {
+    res.send('live');
+  }) as RequestHandler);
 
-    this.app.get('/status', (req: express.Request, res: express.Response) => res.send('live'));
-    this.app.get('/getLastReceivedEncryptedMessage', (req: express.Request, res: express.Response) => {
-      res.json({ result: this.lastEncryptedMessage });
-    });
-    
-    this.app.get('/getLastReceivedDecryptedMessage', (req: express.Request, res: express.Response) => {
-      res.json({ result: this.lastDecryptedMessage });
-    });
-    
-    this.app.get('/getLastDecryptedMessage', (req: express.Request, res: express.Response) => res.json({ result: this.lastDecryptedMessage }));    
+  // Get last received encrypted message
+  app.get('/getLastReceivedEncryptedMessage', ((req, res) => {
+    res.json({ result: lastReceivedEncryptedMessage });
+  }) as RequestHandler);
 
-    this.app.post('/message', this.handleMessage.bind(this));
+  // Get last received decrypted message
+  app.get('/getLastReceivedDecryptedMessage', ((req, res) => {
+    res.json({ result: lastReceivedDecryptedMessage });
+  }) as RequestHandler);
 
-    this.registerWithRegistry();
-    this.start();
-  }
+  // Get last message destination
+  app.get('/getLastMessageDestination', ((req, res) => {
+    res.json({ result: lastMessageDestination });
+  }) as RequestHandler);
 
-  private async registerWithRegistry() {
+  // Get private key
+  app.get('/getPrivateKey', ((req, res) => {
+    res.json({ result: privateKey });
+  }) as RequestHandler);
+
+  // Handle incoming messages
+  app.post('/message', (async (req, res) => {
+    try {
+      console.log(`[Node ${port}] Received message:`, req.body);
+      
+      // If we receive a message with encryptedKey and encryptedMessage, it's an onion layer
+      if (req.body.message) {
+        // Try to parse the message as JSON first to see if it's an onion layer
+        try {
+          const parsedMessage = JSON.parse(req.body.message);
+          if (parsedMessage.encryptedKey && parsedMessage.encryptedMessage) {
+            lastReceivedEncryptedMessage = parsedMessage.encryptedMessage;
+            lastMessageDestination = parsedMessage.nextNodePort;
+
+            // Decrypt the AES key using our private key
+            const decryptedKey = decryptRSA(parsedMessage.encryptedKey, privateKey);
+            
+            // Decrypt the message using the decrypted AES key
+            const decryptedMessage = decryptAES(parsedMessage.encryptedMessage, decryptedKey);
+            lastReceivedDecryptedMessage = decryptedMessage;
+
+            // Try to parse the decrypted message as JSON
+            try {
+              const nextLayerMessage = JSON.parse(decryptedMessage);
+              console.log(`[Node ${port}] Forwarding to next node:`, parsedMessage.nextNodePort);
+              
+              // Forward to next node
+              await axios.post(`http://localhost:${parsedMessage.nextNodePort}/message`, {
+                message: decryptedMessage
+              });
+            } catch (parseError) {
+              // If it's not JSON, it's the final message for a user
+              console.log(`[Node ${port}] Delivering final message to port ${parsedMessage.nextNodePort}`);
+              await axios.post(`http://localhost:${parsedMessage.nextNodePort}/message`, {
+                message: decryptedMessage
+              });
+            }
+          } else {
+            // Direct message to forward
+            console.log(`[Node ${port}] Forwarding direct message to port ${req.body.nextNodePort}`);
+            await axios.post(`http://localhost:${req.body.nextNodePort}/message`, {
+              message: req.body.message
+            });
+          }
+        } catch (parseError) {
+          // If parsing fails, treat it as a direct message
+          console.log(`[Node ${port}] Forwarding direct message to port ${req.body.nextNodePort}`);
+          await axios.post(`http://localhost:${req.body.nextNodePort}/message`, {
+            message: req.body.message
+          });
+        }
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error(`[Node ${port}] Error processing message:`, error);
+      res.status(500).json({ error: 'Failed to process message' });
+    }
+  }) as RequestHandler);
+
+  // Register with the registry
+  try {
     await axios.post(`http://localhost:${REGISTRY_PORT}/registerNode`, {
-      nodeId: this.nodeId,
-      pubKey: this.publicKey,
+      nodeId,
+      pubKey: publicKey
     });
-    console.log(`Node ${this.nodeId} registered with registry`);
+  } catch (error) {
+    console.error(`Failed to register node ${nodeId}:`, error);
   }
 
-  private async handleMessage(req, res) {
-    const { message } = req.body;
-    this.lastEncryptedMessage = message;
+  const server = app.listen(port, () => {
+    console.log(`Node registered on port ${port}`);
+  });
 
-    // Extract encrypted AES key from message
-    const encryptedKey = message.substring(0, 344); // RSA-2048 produces 344 base64 characters
-    const encryptedData = message.substring(344);
-
-    // Decrypt AES key using private key
-    const aesKey = decryptRSA(this.privateKey, encryptedKey);
-
-    // Decrypt the actual message using AES
-    const decryptedMessage = decryptAES(aesKey, encryptedData);
-
-    // Extract next node destination from first 10 characters
-    this.lastMessageDestination = parseInt(decryptedMessage.substring(0, 10), 10);
-    this.lastDecryptedMessage = decryptedMessage.substring(10);
-
-    // Forward to the next node
-    await axios.post(`http://localhost:${this.lastMessageDestination}/message`, { message: this.lastDecryptedMessage });
-
-    res.json({ success: true });
-  }
-
-  private start() {
-    this.app.listen(this.port, () => {
-      console.log(`Node ${this.nodeId} running on port ${this.port}`);
-    });
-  }
-}
+  return server;
+} 
